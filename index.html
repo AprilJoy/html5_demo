@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#f6f1ea" />
+  <title>Sunny Tea House · 分享你的体验</title>
+  <link rel="stylesheet" href="./assets/css/main.css" />
+</head>
+<body>
+  <main class="page">
+
+    <!-- ========== 屏 1：选择 ========== -->
+    <section class="screen is-active" id="screen-select">
+      <header class="header">
+        <div class="shop-logo">🧋</div>
+        <div>
+          <h1 class="shop-name">Sunny Tea House</h1>
+          <p class="shop-sub" id="shopSub"></p>
+        </div>
+      </header>
+
+      <section class="block">
+        <h2 class="block-title"><span class="num">1</span>说说你的感受</h2>
+        <p class="block-hint">选好的和不足的，AI 都会写进评价</p>
+        <div id="feelingGroups"></div>
+      </section>
+
+      <section class="block">
+        <h2 class="block-title"><span class="num">2</span>发布到</h2>
+        <p class="block-hint">选择目标平台，生成对应风格的评价</p>
+        <div class="platform-list" id="platformList"></div>
+      </section>
+
+      <footer class="footer-cta">
+        <button class="btn btn-primary btn-lg" id="generateBtn" disabled>AI 生成评价</button>
+        <p class="cta-tip">根据感受与平台自动生成，可编辑后发布</p>
+      </footer>
+    </section>
+
+    <!-- ========== 屏 2：生成中 ========== -->
+    <section class="screen" id="screen-loading">
+      <div class="loading-cup">🧋</div>
+      <h2 class="loading-title">正在生成评价…</h2>
+      <p class="loading-summary" id="loadingSummary"></p>
+      <ul class="checklist" id="checklist">
+        <li class="check-item" data-check="1"><span class="check-icon"></span><span class="check-text" id="checkText1"></span></li>
+        <li class="check-item" data-check="2"><span class="check-icon"></span><span class="check-text" id="checkText2"></span></li>
+        <li class="check-item" data-check="3"><span class="check-icon"></span><span class="check-text">正在撰写评价内容…</span></li>
+      </ul>
+      <div class="progress"><div class="progress-fill" id="progressFill"></div></div>
+      <p class="loading-tip">生成后可在下一步直接编辑并发布</p>
+      <p class="error-msg" id="genError" hidden>生成失败，请检查网络后重试</p>
+      <button class="btn btn-ghost" id="retryGen" hidden>重试</button>
+    </section>
+
+    <!-- ========== 屏 3：评价已生成 ========== -->
+    <section class="screen" id="screen-result">
+      <header class="result-header">
+        <h2 class="result-title">评价已生成</h2>
+        <span class="platform-badge" id="platformBadge"></span>
+      </header>
+
+      <div class="card edit-card">
+        <div class="card-label-row">
+          <p class="card-label">评价内容（可编辑）</p>
+          <p class="char-count" id="charCount"></p>
+        </div>
+        <p class="card-tags" id="previewTags"></p>
+        <textarea class="editor serif" id="reviewEditor" rows="8" aria-label="评价内容"></textarea>
+      </div>
+
+      <button class="btn btn-primary btn-lg" id="copyPublishBtn"></button>
+      <button class="btn btn-ghost" id="regenBtn">重新生成</button>
+      <p class="cta-tip" id="publishTip"></p>
+    </section>
+
+    <!-- ========== 屏 4：商家后台 ========== -->
+    <section class="screen" id="screen-merchant">
+      <header class="result-header">
+        <h2 class="result-title">商家后台</h2>
+        <span class="push-badge" id="pushBadge">推送中…</span>
+      </header>
+      <p class="block-hint">新评论已自动推送至门店群，商家可实时跟进</p>
+
+      <div class="card">
+        <p class="card-label"><span class="label-icon icon-orange">文</span>评论中文摘要</p>
+        <p class="merchant-text" id="summaryText">生成中…</p>
+      </div>
+
+      <div class="card">
+        <div class="card-label-row">
+          <p class="card-label"><span class="label-icon icon-blue">复</span>商家回复草稿</p>
+          <button class="mini-btn" id="copyReplyBtn">复制</button>
+        </div>
+        <p class="merchant-text" id="replyText">生成中…</p>
+      </div>
+
+      <div class="post-bar">
+        <span class="post-method">POST</span>
+        <span class="post-url" id="postUrl">···</span>
+        <span class="post-status" id="postStatus">···</span>
+      </div>
+      <p class="push-result" id="pushResult"></p>
+
+      <button class="btn btn-ghost" id="repushBtn">重新推送</button>
+      <p class="cta-tip">重新生成摘要与回复草稿并推送到门店群（钉钉 / 企微）</p>
+      <button class="btn btn-link" id="backHomeBtn">← 返回首页再评一条</button>
+    </section>
+
+    <div class="toast" id="toast" role="status"></div>
+  </main>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
