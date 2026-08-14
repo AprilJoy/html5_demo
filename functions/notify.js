@@ -112,7 +112,11 @@ async function chat(messages, env, jsonMode = false) {
   });
   if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}`);
   const data = await res.json();
-  return data.choices?.[0]?.message?.content || '';
+  // 同时返回本次调用的 token 用量，便于「只要用模型就打印日志」
+  return {
+    content: data.choices?.[0]?.message?.content || '',
+    usage: data.usage || null,
+  };
 }
 
 // 响应构造：把本次请求收集到的日志（request.__logs）注入 X-Edge-Logs 响应头，
@@ -150,12 +154,14 @@ export async function onRequest(context) {
 
     let summary;
     let reply;
+    let usedModel = false;
+    let usage = null;
     if (!env.DEEPSEEK_API_KEY) {
       summary = mockSummary(feelings || []) || text.slice(0, 30);
       reply = MOCK_REPLY;
     } else {
       try {
-        const raw = await chat(
+        const r = await chat(
           [
             { role: 'system', content: notifyPrompt },
             { role: 'user', content: String(text) },
@@ -163,9 +169,11 @@ export async function onRequest(context) {
           env,
           true
         );
-        const obj = JSON.parse(raw);
+        const obj = JSON.parse(r.content);
         summary = String(obj.summary || '');
         reply = String(obj.reply || '');
+        usedModel = true;
+        usage = r.usage;
       } catch {
         summary = text.slice(0, 30);
         reply = '';
@@ -174,6 +182,10 @@ export async function onRequest(context) {
 
     const push = await pushRobot({ text: String(text), platform, feelings, summary, reply }, env);
     log(`[edge:notify] channel=${push.channel} pushed=${push.pushed} ${push.errMsg || ''}`);
+    // 用到了模型就打印本次调用的 token 用量（边缘函数无跨请求累计，打本次）
+    if (usedModel && usage) {
+      log(`[edge:usage] promptTokens=${usage.prompt_tokens || 0} completionTokens=${usage.completion_tokens || 0}`);
+    }
     return json(
       200,
       {

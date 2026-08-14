@@ -168,6 +168,13 @@ async function route(req) {
       const { summary, reply } = await summarizeAndReply(String(text), feelings || []);
       const { pushed, channel, errMsg } = await pushRobot({ text: String(text), platform, feelings, summary, reply });
       console.log(`[notify] channel=${channel} platform=${platform} pushed=${pushed} ${errMsg} summary=${summary} cost=${Date.now() - t0}ms`);
+      // 用到了模型（配置了 Key）则补打一条用量累计，确保「只要用模型就有用量日志」
+      if (process.env.DEEPSEEK_API_KEY) {
+        const u = usageReport();
+        console.log(
+          `[usage] calls=${u.calls} promptTokens=${u.promptTokens} completionTokens=${u.completionTokens} estCost=¥${u.estCost.toFixed(4)} mock=false cost=${Date.now() - t0}ms`
+        );
+      }
       return json(200, { ok: true, pushed, channel, errMsg, summary, reply });
     } catch (err) {
       console.log(`[notify] error cost=${Date.now() - t0}ms`);

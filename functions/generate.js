@@ -97,7 +97,11 @@ async function chat(messages, env, jsonMode = false) {
   });
   if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}`);
   const data = await res.json();
-  return data.choices?.[0]?.message?.content || '';
+  // 同时返回本次调用的 token 用量，便于「只要用模型就打印日志」
+  return {
+    content: data.choices?.[0]?.message?.content || '',
+    usage: data.usage || null,
+  };
 }
 
 export async function onRequest(context) {
@@ -138,31 +142,34 @@ export async function onRequest(context) {
 
     const userPrompt = buildUserPrompt(feelings.map(String), String(platform), styles);
     let text = '';
+    let lastUsage = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const strict =
         attempt === 1
           ? `${userPrompt}\n\nIMPORTANT: strictly follow the platform style rules (language, length, emoji usage).`
           : userPrompt;
       try {
-        text = (
-          await chat(
-            [
-              { role: 'system', content: promptSystem },
-              { role: 'user', content: strict },
-            ],
-            env
-          )
-        ).trim();
+        const r = await chat(
+          [
+            { role: 'system', content: promptSystem },
+            { role: 'user', content: strict },
+          ],
+          env
+        );
+        text = r.content.trim();
+        lastUsage = r.usage;
       } catch {
         return json(502, { error: 'upstream failed' }, request);
       }
       if (validate(text, platform)) {
         log(`[edge:generate] mock=false platform=${platform}`);
+        if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
         return json(200, { text }, request);
       }
     }
     // 两次都不达标，返回兜底模板，宁可用模板也不给顾客看跑偏文案
     log(`[edge:generate] fallback=true platform=${platform}`);
+    if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
     return json(200, { text: MOCK_TEMPLATES[platform](feelings), mock: true, fallback: true }, request);
   } finally {
     log(`[edge:generate] cost=${Date.now() - t0}ms`);
