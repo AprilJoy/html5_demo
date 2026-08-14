@@ -5,6 +5,7 @@
 //
 // 说明：Pages「日志分析」面板目前只支持 Node Functions，不显示 Edge Functions 的 console.log。
 // 因此本函数同时把每次调用的关键日志注入响应 Header `X-Edge-Logs`，浏览器/Postman 可直接查看。
+// 注意：日志用闭包数组 logs 收集（不依赖 request 扩展属性，避免部分 V8 运行环境挂不上）。
 
 const DEFAULT_PROMPT_SYSTEM =
   `You are a review-writing assistant for "Sunny Tea House", a bubble tea shop in San Jose.
@@ -76,11 +77,10 @@ function rateLimit(ip, limit) {
   return true;
 }
 
-// 响应构造：把本次请求收集到的日志（request.__logs）注入 X-Edge-Logs 响应头，
+// 响应构造：把本次请求收集到的日志（logs 闭包数组）注入 X-Edge-Logs 响应头，
 // 弥补 Pages「日志分析」面板不显示 Edge Functions console.log 的缺口。
-function json(status, obj, request) {
+function json(status, obj, logs) {
   const headers = { 'Content-Type': 'application/json; charset=utf-8' };
-  const logs = request && request.__logs;
   if (logs && logs.length) headers['X-Edge-Logs'] = logs.join(' | ').slice(0, 1800);
   return new Response(JSON.stringify(obj), { status, headers });
 }
@@ -106,72 +106,82 @@ async function chat(messages, env, jsonMode = false) {
 
 export async function onRequest(context) {
   const { request, env } = context;
-  // 本次请求独立的日志收集器（避免并发请求串日志）
-  request.__logs = [];
+  // 本次请求独立的日志收集器（闭包数组，不依赖 request 扩展属性，跨运行环境稳定）
+  const logs = [];
   const log = (...args) => {
     const line = args.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
-    request.__logs.push(line);
+    logs.push(line);
     console.log(line);
   };
   const t0 = Date.now();
-  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, request);
+  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, logs);
+
+  let out; // { status, obj }
   try {
     let body;
     try {
       body = await request.json();
     } catch {
-      return json(400, { error: 'invalid json' }, request);
+      out = { status: 400, obj: { error: 'invalid json' } };
     }
     const { feelings, platform } = body || {};
-    if (!Array.isArray(feelings) || !feelings.length || !platform) {
-      return json(400, { error: 'feelings and platform are required' }, request);
+    if (!out && (!Array.isArray(feelings) || !feelings.length || !platform)) {
+      out = { status: 400, obj: { error: 'feelings and platform are required' } };
     }
-
-    const limit = Number(env.RATE_LIMIT_PER_HOUR || 10);
-    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'edge';
-    if (!rateLimit(ip, limit)) return json(429, { error: 'rate limited' }, request);
-
-    // 环境变量热更新 Prompt，未配置则回落内置默认文案
-    const promptSystem = env.PROMPT_SYSTEM || DEFAULT_PROMPT_SYSTEM;
-    const styles = getPlatformStyles(env);
-
-    if (!env.DEEPSEEK_API_KEY || !styles[platform]) {
-      log(`[edge:generate] mock=true platform=${platform}`);
-      return json(200, { text: MOCK_TEMPLATES[platform](feelings), mock: true }, request);
+    if (!out) {
+      const limit = Number(env.RATE_LIMIT_PER_HOUR || 10);
+      const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'edge';
+      if (!rateLimit(ip, limit)) out = { status: 429, obj: { error: 'rate limited' } };
     }
-
-    const userPrompt = buildUserPrompt(feelings.map(String), String(platform), styles);
-    let text = '';
-    let lastUsage = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const strict =
-        attempt === 1
-          ? `${userPrompt}\n\nIMPORTANT: strictly follow the platform style rules (language, length, emoji usage).`
-          : userPrompt;
-      try {
-        const r = await chat(
-          [
-            { role: 'system', content: promptSystem },
-            { role: 'user', content: strict },
-          ],
-          env
-        );
-        text = r.content.trim();
-        lastUsage = r.usage;
-      } catch {
-        return json(502, { error: 'upstream failed' }, request);
+    if (!out) {
+      // 环境变量热更新 Prompt，未配置则回落内置默认文案
+      const promptSystem = env.PROMPT_SYSTEM || DEFAULT_PROMPT_SYSTEM;
+      const styles = getPlatformStyles(env);
+      if (!env.DEEPSEEK_API_KEY || !styles[platform]) {
+        log(`[edge:generate] mock=true platform=${platform}`);
+        out = { status: 200, obj: { text: MOCK_TEMPLATES[platform](feelings), mock: true } };
+      } else {
+        const userPrompt = buildUserPrompt(feelings.map(String), String(platform), styles);
+        let text = '';
+        let lastUsage = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const strict =
+            attempt === 1
+              ? `${userPrompt}\n\nIMPORTANT: strictly follow the platform style rules (language, length, emoji usage).`
+              : userPrompt;
+          try {
+            const r = await chat(
+              [
+                { role: 'system', content: promptSystem },
+                { role: 'user', content: strict },
+              ],
+              env
+            );
+            text = r.content.trim();
+            lastUsage = r.usage;
+          } catch {
+            out = { status: 502, obj: { error: 'upstream failed' } };
+            break;
+          }
+          if (validate(text, platform)) {
+            log(`[edge:generate] mock=false platform=${platform}`);
+            if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
+            out = { status: 200, obj: { text } };
+            break;
+          }
+        }
+        if (!out) {
+          // 两次都不达标，返回兜底模板，宁可用模板也不给顾客看跑偏文案
+          log(`[edge:generate] fallback=true platform=${platform}`);
+          if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
+          out = { status: 200, obj: { text: MOCK_TEMPLATES[platform](feelings), mock: true, fallback: true } };
+        }
       }
-      if (validate(text, platform)) {
-        log(`[edge:generate] mock=false platform=${platform}`);
-        if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
-        return json(200, { text }, request);
-      }
     }
-    // 两次都不达标，返回兜底模板，宁可用模板也不给顾客看跑偏文案
-    log(`[edge:generate] fallback=true platform=${platform}`);
-    if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
-    return json(200, { text: MOCK_TEMPLATES[platform](feelings), mock: true, fallback: true }, request);
+  } catch (err) {
+    out = { status: 500, obj: { error: 'generate failed' } };
   } finally {
     log(`[edge:generate] cost=${Date.now() - t0}ms`);
   }
+  return json(out.status, out.obj, logs);
 }

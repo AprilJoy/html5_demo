@@ -4,6 +4,7 @@
 //
 // 说明：Pages「日志分析」面板目前只支持 Node Functions，不显示 Edge Functions 的 console.log。
 // 因此本函数同时把每次调用的关键日志注入响应 Header `X-Edge-Logs`，浏览器/Postman 可直接查看。
+// 注意：日志用闭包数组 logs 收集（不依赖 request 扩展属性，避免部分 V8 运行环境挂不上）。
 
 const NOTIFY_PROMPT = `你是餐饮店运营助手。根据顾客的评价内容，生成两部分内容并以 JSON 输出（不要输出其他内容）：
 {"summary": "...", "reply": "..."}
@@ -119,86 +120,79 @@ async function chat(messages, env, jsonMode = false) {
   };
 }
 
-// 响应构造：把本次请求收集到的日志（request.__logs）注入 X-Edge-Logs 响应头，
-// 弥补 Pages「日志分析」面板不显示 Edge Functions console.log 的缺口。
-function json(status, obj, request) {
+// 响应构造：把本次请求收集到的日志（logs 闭包数组）注入 X-Edge-Logs 响应头。
+function json(status, obj, logs) {
   const headers = { 'Content-Type': 'application/json; charset=utf-8' };
-  const logs = request && request.__logs;
   if (logs && logs.length) headers['X-Edge-Logs'] = logs.join(' | ').slice(0, 1800);
   return new Response(JSON.stringify(obj), { status, headers });
 }
 
 export async function onRequest(context) {
   const { request, env } = context;
-  // 本次请求独立的日志收集器（避免并发请求串日志）
-  request.__logs = [];
+  // 本次请求独立的日志收集器（闭包数组，不依赖 request 扩展属性，跨运行环境稳定）
+  const logs = [];
   const log = (...args) => {
     const line = args.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
-    request.__logs.push(line);
+    logs.push(line);
     console.log(line);
   };
   const t0 = Date.now();
-  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, request);
+  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, logs);
+
+  let out; // { status, obj }
   try {
     let body;
     try {
       body = await request.json();
     } catch {
-      return json(400, { error: 'invalid json' }, request);
+      out = { status: 400, obj: { error: 'invalid json' } };
     }
     const { text, platform, feelings } = body || {};
-    if (!text) return json(400, { error: 'text is required' }, request);
+    if (!out && !text) out = { status: 400, obj: { error: 'text is required' } };
+    if (!out) {
+      // 支持环境变量热更新 Prompt，未配置则用内置默认文案
+      const notifyPrompt = env.NOTIFY_PROMPT || NOTIFY_PROMPT;
 
-    // 支持环境变量热更新 Prompt，未配置则用内置默认文案
-    const notifyPrompt = env.NOTIFY_PROMPT || NOTIFY_PROMPT;
-
-    let summary;
-    let reply;
-    let usedModel = false;
-    let usage = null;
-    if (!env.DEEPSEEK_API_KEY) {
-      summary = mockSummary(feelings || []) || text.slice(0, 30);
-      reply = MOCK_REPLY;
-    } else {
-      try {
-        const r = await chat(
-          [
-            { role: 'system', content: notifyPrompt },
-            { role: 'user', content: String(text) },
-          ],
-          env,
-          true
-        );
-        const obj = JSON.parse(r.content);
-        summary = String(obj.summary || '');
-        reply = String(obj.reply || '');
-        usedModel = true;
-        usage = r.usage;
-      } catch {
-        summary = text.slice(0, 30);
-        reply = '';
+      let summary;
+      let reply;
+      let usedModel = false;
+      let usage = null;
+      if (!env.DEEPSEEK_API_KEY) {
+        summary = mockSummary(feelings || []) || text.slice(0, 30);
+        reply = MOCK_REPLY;
+      } else {
+        try {
+          const r = await chat(
+            [
+              { role: 'system', content: notifyPrompt },
+              { role: 'user', content: String(text) },
+            ],
+            env,
+            true
+          );
+          const obj = JSON.parse(r.content);
+          summary = String(obj.summary || '');
+          reply = String(obj.reply || '');
+          usedModel = true;
+          usage = r.usage;
+        } catch {
+          summary = text.slice(0, 30);
+          reply = '';
+        }
       }
-    }
 
-    const push = await pushRobot({ text: String(text), platform, feelings, summary, reply }, env);
-    log(`[edge:notify] channel=${push.channel} pushed=${push.pushed} ${push.errMsg || ''}`);
-    // 用到了模型就打印本次调用的 token 用量（边缘函数无跨请求累计，打本次）
-    if (usedModel && usage) {
-      log(`[edge:usage] promptTokens=${usage.prompt_tokens || 0} completionTokens=${usage.completion_tokens || 0}`);
+      const push = await pushRobot({ text: String(text), platform, feelings, summary, reply }, env);
+      log(`[edge:notify] channel=${push.channel} pushed=${push.pushed} ${push.errMsg || ''}`);
+      // 用到了模型就打印本次调用的 token 用量（边缘函数无跨请求累计，打本次）
+      if (usedModel && usage) {
+        log(`[edge:usage] promptTokens=${usage.prompt_tokens || 0} completionTokens=${usage.completion_tokens || 0}`);
+      }
+      out = { status: 200, obj: { ok: true, pushed: push.pushed, channel: push.channel, errMsg: push.errMsg, summary, reply } };
     }
-    return json(
-      200,
-      {
-        ok: true,
-        pushed: push.pushed,
-        channel: push.channel,
-        errMsg: push.errMsg,
-        summary,
-        reply,
-      },
-      request
-    );
+  } catch (err) {
+    out = { status: 500, obj: { error: 'notify failed' } };
   } finally {
     log(`[edge:notify] cost=${Date.now() - t0}ms`);
   }
+  return json(out.status, out.obj, logs);
 }
