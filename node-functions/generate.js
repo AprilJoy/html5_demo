@@ -1,11 +1,11 @@
-// EdgeOne Pages Edge Function —— POST /generate
-// 零依赖，运行在 V8 边缘运行时。Prompt 与 server/prompts.js 保持一致。
+// EdgeOne Pages Node Functions —— POST /generate
+// 运行在 Node.js 运行时（Cloud Functions）。Prompt 与 server/prompts.js 保持一致。
 // 静态页面由 Pages 直接托管，本函数只接管 /generate，与页面同源、无跨域。
 // Prompt 支持环境变量热更新：env.PROMPT_SYSTEM / env.PROMPT_STYLE_GOOGLE / env.PROMPT_STYLE_XHS，未配置则回落内置默认。
 //
-// 说明：Pages「日志分析」面板目前只支持 Node Functions，不显示 Edge Functions 的 console.log。
-// 因此本函数同时把每次调用的关键日志注入响应 Header `X-Edge-Logs`，浏览器/Postman 可直接查看。
-// 注意：日志用闭包数组 logs 收集（不依赖 request 扩展属性，避免部分 V8 运行环境挂不上）。
+// 说明：Node Functions 的 console.log 会在 EdgeOne Pages 控制台「日志分析」面板中展示
+// （与 Edge Functions 不同，Node Functions 的日志原生可见）。因此本文件直接 console.log 即可，
+// 无需再依赖 X-Edge-Logs 响应头（响应头仍保留作为备用查看方式）。
 
 const DEFAULT_PROMPT_SYSTEM =
   `You are a review-writing assistant for "Sunny Tea House", a bubble tea shop in San Jose.
@@ -63,7 +63,7 @@ function validate(text, platform) {
   return false;
 }
 
-// 最佳努力限流：边缘隔离实例之间不共享内存，属软限制（演示场景足够）。
+// 最佳努力限流：Node Functions 在中心机房运行，多实例仍可能不共享内存，属软限制（演示场景足够）。
 const hits = new Map();
 function rateLimit(ip, limit) {
   const now = Date.now();
@@ -77,8 +77,8 @@ function rateLimit(ip, limit) {
   return true;
 }
 
-// 响应构造：把本次请求收集到的日志（logs 闭包数组）注入 X-Edge-Logs 响应头，
-// 弥补 Pages「日志分析」面板不显示 Edge Functions console.log 的缺口。
+// 响应构造：把本次请求收集到的日志（logs 闭包数组）注入 X-Edge-Logs 响应头（备用查看方式）。
+// Node Functions 原生支持「日志分析」面板，console.log 可直接在控制台查看。
 function json(status, obj, logs) {
   const headers = { 'Content-Type': 'application/json; charset=utf-8' };
   if (logs && logs.length) headers['X-Edge-Logs'] = logs.join(' | ').slice(0, 1800);
@@ -104,14 +104,14 @@ async function chat(messages, env, jsonMode = false) {
   };
 }
 
-export async function onRequest(context) {
+export default async function onRequest(context) {
   const { request, env } = context;
-  // 本次请求独立的日志收集器（闭包数组，不依赖 request 扩展属性，跨运行环境稳定）
+  // 本次请求独立的日志收集器（闭包数组，同时驱动 console.log 与 X-Edge-Logs 头）
   const logs = [];
   const log = (...args) => {
     const line = args.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
     logs.push(line);
-    console.log(line);
+    console.log(line); // Node Functions：控制台「日志分析」面板原生可见
   };
   const t0 = Date.now();
   if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, logs);
@@ -130,7 +130,7 @@ export async function onRequest(context) {
     }
     if (!out) {
       const limit = Number(env.RATE_LIMIT_PER_HOUR || 10);
-      const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'edge';
+      const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'node';
       if (!rateLimit(ip, limit)) out = { status: 429, obj: { error: 'rate limited' } };
     }
     if (!out) {
@@ -138,7 +138,7 @@ export async function onRequest(context) {
       const promptSystem = env.PROMPT_SYSTEM || DEFAULT_PROMPT_SYSTEM;
       const styles = getPlatformStyles(env);
       if (!env.DEEPSEEK_API_KEY || !styles[platform]) {
-        log(`[edge:generate] mock=true platform=${platform}`);
+        log(`[node:generate] mock=true platform=${platform}`);
         out = { status: 200, obj: { text: MOCK_TEMPLATES[platform](feelings), mock: true } };
       } else {
         const userPrompt = buildUserPrompt(feelings.map(String), String(platform), styles);
@@ -164,16 +164,16 @@ export async function onRequest(context) {
             break;
           }
           if (validate(text, platform)) {
-            log(`[edge:generate] mock=false platform=${platform}`);
-            if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
+            log(`[node:generate] mock=false platform=${platform}`);
+            if (lastUsage) log(`[node:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
             out = { status: 200, obj: { text } };
             break;
           }
         }
         if (!out) {
           // 两次都不达标，返回兜底模板，宁可用模板也不给顾客看跑偏文案
-          log(`[edge:generate] fallback=true platform=${platform}`);
-          if (lastUsage) log(`[edge:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
+          log(`[node:generate] fallback=true platform=${platform}`);
+          if (lastUsage) log(`[node:usage] promptTokens=${lastUsage.prompt_tokens || 0} completionTokens=${lastUsage.completion_tokens || 0}`);
           out = { status: 200, obj: { text: MOCK_TEMPLATES[platform](feelings), mock: true, fallback: true } };
         }
       }
@@ -181,7 +181,7 @@ export async function onRequest(context) {
   } catch (err) {
     out = { status: 500, obj: { error: 'generate failed' } };
   } finally {
-    log(`[edge:generate] cost=${Date.now() - t0}ms`);
+    log(`[node:generate] cost=${Date.now() - t0}ms`);
   }
   return json(out.status, out.obj, logs);
 }

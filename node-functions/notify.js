@@ -1,10 +1,9 @@
-// EdgeOne Pages Edge Function —— POST /notify
-// 零依赖，运行在 V8 边缘运行时。Prompt 与 server/prompts.js 保持一致。
+// EdgeOne Pages Node Functions —— POST /notify
+// 运行在 Node.js 运行时（Cloud Functions）。Prompt 与 server/prompts.js 保持一致。
 // 摘要+回复草稿 + 群机器人推送（自动识别钉钉/企微；钉钉支持「关键词」或「加签」）。
 //
-// 说明：Pages「日志分析」面板目前只支持 Node Functions，不显示 Edge Functions 的 console.log。
-// 因此本函数同时把每次调用的关键日志注入响应 Header `X-Edge-Logs`，浏览器/Postman 可直接查看。
-// 注意：日志用闭包数组 logs 收集（不依赖 request 扩展属性，避免部分 V8 运行环境挂不上）。
+// 说明：Node Functions 的 console.log 会在 EdgeOne Pages 控制台「日志分析」面板中展示
+// （与 Edge Functions 不同，Node Functions 的日志原生可见）。X-Edge-Logs 响应头仍保留作备用。
 
 const NOTIFY_PROMPT = `你是餐饮店运营助手。根据顾客的评价内容，生成两部分内容并以 JSON 输出（不要输出其他内容）：
 {"summary": "...", "reply": "..."}
@@ -26,7 +25,7 @@ function detectChannel(url) {
 }
 
 // 钉钉「加签」安全设置：sign = Base64(HmacSHA256(timestamp + "\n" + secret))。
-// 用 Web Crypto（V8 全局可用）；若环境不支持则退化为不加签（关键词模式仍可用）。
+// 用 Web Crypto（Node 20 全局可用）；若环境不支持则退化为不加签（关键词模式仍可用）。
 async function hmacSign(url, secret) {
   if (!secret) return url;
   try {
@@ -120,21 +119,21 @@ async function chat(messages, env, jsonMode = false) {
   };
 }
 
-// 响应构造：把本次请求收集到的日志（logs 闭包数组）注入 X-Edge-Logs 响应头。
+// 响应构造：把本次请求收集到的日志（logs 闭包数组）注入 X-Edge-Logs 响应头（备用查看方式）。
 function json(status, obj, logs) {
   const headers = { 'Content-Type': 'application/json; charset=utf-8' };
   if (logs && logs.length) headers['X-Edge-Logs'] = logs.join(' | ').slice(0, 1800);
   return new Response(JSON.stringify(obj), { status, headers });
 }
 
-export async function onRequest(context) {
+export default async function onRequest(context) {
   const { request, env } = context;
-  // 本次请求独立的日志收集器（闭包数组，不依赖 request 扩展属性，跨运行环境稳定）
+  // 本次请求独立的日志收集器（闭包数组，同时驱动 console.log 与 X-Edge-Logs 头）
   const logs = [];
   const log = (...args) => {
     const line = args.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
     logs.push(line);
-    console.log(line);
+    console.log(line); // Node Functions：控制台「日志分析」面板原生可见
   };
   const t0 = Date.now();
   if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, logs);
@@ -182,17 +181,17 @@ export async function onRequest(context) {
       }
 
       const push = await pushRobot({ text: String(text), platform, feelings, summary, reply }, env);
-      log(`[edge:notify] channel=${push.channel} pushed=${push.pushed} ${push.errMsg || ''}`);
-      // 用到了模型就打印本次调用的 token 用量（边缘函数无跨请求累计，打本次）
+      log(`[node:notify] channel=${push.channel} pushed=${push.pushed} ${push.errMsg || ''}`);
+      // 用到了模型就打印本次调用的 token 用量
       if (usedModel && usage) {
-        log(`[edge:usage] promptTokens=${usage.prompt_tokens || 0} completionTokens=${usage.completion_tokens || 0}`);
+        log(`[node:usage] promptTokens=${usage.prompt_tokens || 0} completionTokens=${usage.completion_tokens || 0}`);
       }
       out = { status: 200, obj: { ok: true, pushed: push.pushed, channel: push.channel, errMsg: push.errMsg, summary, reply } };
     }
   } catch (err) {
     out = { status: 500, obj: { error: 'notify failed' } };
   } finally {
-    log(`[edge:notify] cost=${Date.now() - t0}ms`);
+    log(`[node:notify] cost=${Date.now() - t0}ms`);
   }
   return json(out.status, out.obj, logs);
 }
