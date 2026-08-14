@@ -1,6 +1,9 @@
 // EdgeOne Pages Edge Function —— POST /notify
 // 零依赖，运行在 V8 边缘运行时。Prompt 与 server/prompts.js 保持一致。
 // 摘要+回复草稿 + 群机器人推送（自动识别钉钉/企微；钉钉支持「关键词」或「加签」）。
+//
+// 说明：Pages「日志分析」面板目前只支持 Node Functions，不显示 Edge Functions 的 console.log。
+// 因此本函数同时把每次调用的关键日志注入响应 Header `X-Edge-Logs`，浏览器/Postman 可直接查看。
 
 const NOTIFY_PROMPT = `你是餐饮店运营助手。根据顾客的评价内容，生成两部分内容并以 JSON 输出（不要输出其他内容）：
 {"summary": "...", "reply": "..."}
@@ -112,26 +115,35 @@ async function chat(messages, env, jsonMode = false) {
   return data.choices?.[0]?.message?.content || '';
 }
 
-function json(status, obj) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-  });
+// 响应构造：把本次请求收集到的日志（request.__logs）注入 X-Edge-Logs 响应头，
+// 弥补 Pages「日志分析」面板不显示 Edge Functions console.log 的缺口。
+function json(status, obj, request) {
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+  const logs = request && request.__logs;
+  if (logs && logs.length) headers['X-Edge-Logs'] = logs.join(' | ').slice(0, 1800);
+  return new Response(JSON.stringify(obj), { status, headers });
 }
 
 export async function onRequest(context) {
   const { request, env } = context;
-  if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
+  // 本次请求独立的日志收集器（避免并发请求串日志）
+  request.__logs = [];
+  const log = (...args) => {
+    const line = args.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
+    request.__logs.push(line);
+    console.log(line);
+  };
   const t0 = Date.now();
+  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, request);
   try {
     let body;
     try {
       body = await request.json();
     } catch {
-      return json(400, { error: 'invalid json' });
+      return json(400, { error: 'invalid json' }, request);
     }
     const { text, platform, feelings } = body || {};
-    if (!text) return json(400, { error: 'text is required' });
+    if (!text) return json(400, { error: 'text is required' }, request);
 
     // 支持环境变量热更新 Prompt，未配置则用内置默认文案
     const notifyPrompt = env.NOTIFY_PROMPT || NOTIFY_PROMPT;
@@ -161,15 +173,20 @@ export async function onRequest(context) {
     }
 
     const push = await pushRobot({ text: String(text), platform, feelings, summary, reply }, env);
-    return json(200, {
-      ok: true,
-      pushed: push.pushed,
-      channel: push.channel,
-      errMsg: push.errMsg,
-      summary,
-      reply,
-    });
+    log(`[edge:notify] channel=${push.channel} pushed=${push.pushed} ${push.errMsg || ''}`);
+    return json(
+      200,
+      {
+        ok: true,
+        pushed: push.pushed,
+        channel: push.channel,
+        errMsg: push.errMsg,
+        summary,
+        reply,
+      },
+      request
+    );
   } finally {
-    console.log(`[edge:notify] cost=${Date.now() - t0}ms`);
+    log(`[edge:notify] cost=${Date.now() - t0}ms`);
   }
 }

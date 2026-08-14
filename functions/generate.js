@@ -2,6 +2,9 @@
 // 零依赖，运行在 V8 边缘运行时。Prompt 与 server/prompts.js 保持一致。
 // 静态页面由 Pages 直接托管，本函数只接管 /generate，与页面同源、无跨域。
 // Prompt 支持环境变量热更新：env.PROMPT_SYSTEM / env.PROMPT_STYLE_GOOGLE / env.PROMPT_STYLE_XHS，未配置则回落内置默认。
+//
+// 说明：Pages「日志分析」面板目前只支持 Node Functions，不显示 Edge Functions 的 console.log。
+// 因此本函数同时把每次调用的关键日志注入响应 Header `X-Edge-Logs`，浏览器/Postman 可直接查看。
 
 const DEFAULT_PROMPT_SYSTEM =
   `You are a review-writing assistant for "Sunny Tea House", a bubble tea shop in San Jose.
@@ -73,11 +76,13 @@ function rateLimit(ip, limit) {
   return true;
 }
 
-function json(status, obj) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-  });
+// 响应构造：把本次请求收集到的日志（request.__logs）注入 X-Edge-Logs 响应头，
+// 弥补 Pages「日志分析」面板不显示 Edge Functions console.log 的缺口。
+function json(status, obj, request) {
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+  const logs = request && request.__logs;
+  if (logs && logs.length) headers['X-Edge-Logs'] = logs.join(' | ').slice(0, 1800);
+  return new Response(JSON.stringify(obj), { status, headers });
 }
 
 async function chat(messages, env, jsonMode = false) {
@@ -97,30 +102,38 @@ async function chat(messages, env, jsonMode = false) {
 
 export async function onRequest(context) {
   const { request, env } = context;
-  if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
+  // 本次请求独立的日志收集器（避免并发请求串日志）
+  request.__logs = [];
+  const log = (...args) => {
+    const line = args.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' ');
+    request.__logs.push(line);
+    console.log(line);
+  };
   const t0 = Date.now();
+  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, request);
   try {
     let body;
     try {
       body = await request.json();
     } catch {
-      return json(400, { error: 'invalid json' });
+      return json(400, { error: 'invalid json' }, request);
     }
     const { feelings, platform } = body || {};
     if (!Array.isArray(feelings) || !feelings.length || !platform) {
-      return json(400, { error: 'feelings and platform are required' });
+      return json(400, { error: 'feelings and platform are required' }, request);
     }
 
     const limit = Number(env.RATE_LIMIT_PER_HOUR || 10);
     const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'edge';
-    if (!rateLimit(ip, limit)) return json(429, { error: 'rate limited' });
+    if (!rateLimit(ip, limit)) return json(429, { error: 'rate limited' }, request);
 
     // 环境变量热更新 Prompt，未配置则回落内置默认文案
     const promptSystem = env.PROMPT_SYSTEM || DEFAULT_PROMPT_SYSTEM;
     const styles = getPlatformStyles(env);
 
     if (!env.DEEPSEEK_API_KEY || !styles[platform]) {
-      return json(200, { text: MOCK_TEMPLATES[platform](feelings), mock: true });
+      log(`[edge:generate] mock=true platform=${platform}`);
+      return json(200, { text: MOCK_TEMPLATES[platform](feelings), mock: true }, request);
     }
 
     const userPrompt = buildUserPrompt(feelings.map(String), String(platform), styles);
@@ -141,13 +154,17 @@ export async function onRequest(context) {
           )
         ).trim();
       } catch {
-        return json(502, { error: 'upstream failed' });
+        return json(502, { error: 'upstream failed' }, request);
       }
-      if (validate(text, platform)) return json(200, { text });
+      if (validate(text, platform)) {
+        log(`[edge:generate] mock=false platform=${platform}`);
+        return json(200, { text }, request);
+      }
     }
     // 两次都不达标，返回兜底模板，宁可用模板也不给顾客看跑偏文案
-    return json(200, { text: MOCK_TEMPLATES[platform](feelings), mock: true, fallback: true });
+    log(`[edge:generate] fallback=true platform=${platform}`);
+    return json(200, { text: MOCK_TEMPLATES[platform](feelings), mock: true, fallback: true }, request);
   } finally {
-    console.log(`[edge:generate] cost=${Date.now() - t0}ms`);
+    log(`[edge:generate] cost=${Date.now() - t0}ms`);
   }
 }

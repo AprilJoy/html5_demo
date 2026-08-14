@@ -85,3 +85,35 @@ edgeone pages env add ROBOT_KEYWORD "Sunny Tea House"
 ## 七、回退到 SCF（备用）
 
 若 EdgeOne 不满足需求，仍可用原有 SCF 方案：见 `docs/deploy.md`，把整个目录打包上传为 Web 函数，入口 `scf.main_handler`。
+
+## 八、日志在哪里看（为什么「日志分析」面板看不到）
+
+**结论：我们的 `functions/*.js` 是 Edge Functions（V8 运行时），而 EdgeOne Pages 控制台的「日志分析」面板目前只收录 Node Functions 的日志（官方文档原文："后续将逐步支持如 Edge Functions 等其他服务的日志"）。所以你在「日志分析」里看不到任何东西——这不是代码 bug，是平台限制。**
+
+函数里的 `console.log(...)` 确实执行了，只是没地方展示。为此我们做了**补偿方案**：把每次调用的关键日志注入到响应的 **`X-Edge-Logs` HTTP 头**，你可以直接在客户端看到。
+
+### 怎么看（两种）
+
+**方式 1：浏览器 DevTools（最直观，评审截图用）**
+1. 手机/电脑打开 Pages 地址，进到能触发 `/generate` 或 `/notify` 的流程（生成评价、或点「复制并发布」）。
+2. 打开浏览器开发者工具 → **Network（网络）** 面板。
+3. 找到 `generate` / `notify` 那条请求（类型 `fetch` / `xhr`），点开 → 看 **Response Headers（响应头）**。
+4. 里面有一行 `x-edge-logs`，值类似：
+   ```
+   [edge:generate] mock=false platform=xhs | [edge:generate] cost=1732ms
+   [edge:notify] channel=dingtalk pushed=true  | [edge:notify] cost=911ms
+   ```
+   这就是每次调用的耗时（cost）、是否 mock、推送结果——评审证据直接截图即可。
+
+**方式 2：curl / Postman**
+```bash
+curl -s -i -X POST https://<你的地址>.edgeonepages.cn/generate \
+  -H 'content-type: application/json' \
+  -d '{"feelings":["环境安静"],"platform":"xhs"}' | grep -i x-edge-logs
+```
+
+### 想看真正的服务端日志面板？两条路
+- **等平台支持**：EdgeOne Pages 后续版本「日志分析」会支持 Edge Functions，到时控制台直接可见（无需改代码）。
+- **改用 Node Functions**：把函数改成 Node Functions 写法（需 Node 运行时），「日志分析」即可收录。但 Node Functions 在 Pages 的可用性、写法约定与零依赖兼容性需另行验证，当前 Edge 方案最稳，建议演示先走 `X-Edge-Logs` 方案。
+
+> 注：SCF / 本地版（`server/local.js` + `handler.js`）的日志是真实打到 stdout 的，在本地终端或 SCF 日志里可见 `[usage] ... cost=..ms`，不受此限制。
